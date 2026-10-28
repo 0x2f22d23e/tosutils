@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+import errno
+import hashlib
+import os
+import struct
+import sys
+
+base_image_file = ""
+base_image_hash = "5d0fc944e5d89c155c0fc17c148646715bc1db6fa5750c0b913772cfec19ba26"
+slipstream_file = ""
+output_file = ""
+
+
+def round_up(x, y):
+    return x if x % y == 0 else x + y - x % y
+
+
+def got_error(e):
+    print("Error: code " + str(e))
+    sys.exit(e)
+
+
+def make_slipstream_iso():
+    output_size = (
+        round_up(
+            os.path.getsize(base_image_file) + os.path.getsize(slipstream_file), 2048
+        )
+        + 2048
+    )
+    output_size = round_up(int(output_size * 1.2), 2048)
+    print(str(output_size))
+    # Zero the output file
+    res = os.system(
+        'dd if=/dev/zero of="' + output_file + '" bs=' + str(output_size) + " count=1"
+    )
+    if res:
+        got_error(res)
+    # Write TempleOS.ISO data to the beginning of output file
+    res = os.system(
+        'dd if="' + base_image_file + '" of="' + output_file + '" conv=notrunc'
+    )
+    if res:
+        got_error(res)
+    # Patch RedSea partition size to 0xffffffffffffff
+    f = open(output_file, "rb+")
+    f.seek(0xB010)
+    f.write(struct.pack("<Q", 0xFFFFFFFFFFFFFF))
+    # Create Once.HC in Home to mount the slipstream file
+    f.seek(0xE4B080)
+    f.write(b"\x20\x08")
+    f.write(b"Once.HC")
+    f.seek(0xE4B0A8)
+    clus = int(round_up(os.path.getsize(base_image_file), 512) / 512)
+    once_hc_data = (
+        b'MountFile("'
+        + bytes(os.path.basename(slipstream_file), encoding="utf-8")
+        + b'");\nCd("M:/");\nXTalk(Fs,"#include \\"Run\\";\n");\n'
+    )
+    f.write(struct.pack("<QQLL", clus, len(once_hc_data), 0, 0))
+    f.seek(clus * 512)
+    f.write(once_hc_data)
+    # Read slipstream data
+    slipstream_data = open(slipstream_file, "rb").read()
+    # Write slipstream file to output file
+    clus += 1
+    f.seek(0xE4B0C0)
+    f.write(b"\x20\x08")
+    f.write(bytes(os.path.basename(slipstream_file), encoding="utf-8"))
+    f.seek(0xE4B0E8)
+    f.write(struct.pack("<QQLL", clus, len(slipstream_data), 0, 0))
+    f.seek(clus * 512)
+    f.write(slipstream_data)
+    f.close()
+
+
+def check_base_image_hash():
+    m = hashlib.sha256()
+    m.update(open(base_image_file, "rb").read())
+    if m.hexdigest() != base_image_hash:
+        print(
+            "Error: base image hash does not match (expected "
+            + base_image_hash
+            + ", got "
+            + m.hexdigest()
+            + ")"
+        )
+        sys.exit(1)
+
+
+def check_if_path_exists(path):
+    if not os.path.exists(path):
+        print("Error: Path does not exist: " + path)
+        sys.exit(errno.ENOENT)
+
+
+def set_file_paths():
+    global base_image_file
+    global slipstream_file
+    global output_file
+    base_image_file = sys.argv[1]
+    slipstream_file = sys.argv[2]
+    output_file = sys.argv[3]
+
+
+def usage():
+    print("usage: " + str(sys.argv[0]) + " TempleOS.ISO MySlipstream.ISO.C output.iso")
+    sys.exit(0)
+
+
+def main():
+    if len(sys.argv) < 4:
+        usage()
+    set_file_paths()
+    check_if_path_exists(base_image_file)
+    check_if_path_exists(slipstream_file)
+    check_base_image_hash()
+    make_slipstream_iso()
+    sys.exit(0)
+
+
+main()
